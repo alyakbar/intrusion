@@ -1,0 +1,147 @@
+# Network Anomaly Detection System Configuration
+
+# Data Settings
+data:
+  raw_data_path: "data/raw/"
+  processed_data_path: "data/processed/"
+  datasets:
+    - "NSL-KDD"
+    - "CICIDS"
+  test_size: 0.2
+  validation_size: 0.1
+  random_state: 42
+
+# Feature Engineering
+features:
+  scaling_method: "standard"  # standard, minmax, robust
+  feature_selection: true
+  n_features: 20
+  pca_components: null  # null or number
+
+# Model Settings
+models:
+  supervised:
+    random_forest:
+      n_estimators: 100
+      max_depth: 20
+      random_state: 42
+    gradient_boosting:
+      n_estimators: 100
+      learning_rate: 0.1
+      max_depth: 5
+    svm:
+      kernel: "rbf"
+      C: 1.0
+      gamma: "scale"
+    
+  unsupervised:
+    isolation_forest:
+      n_estimators: 100
+      contamination: 0.1
+      random_state: 42
+    kmeans:
+      n_clusters: 5
+      random_state: 42
+    dbscan:
+      eps: 0.5
+      min_samples: 5
+  
+  neural_networks:
+    autoencoder:
+      encoding_dim: 32
+      epochs: 50
+      batch_size: 128
+      learning_rate: 0.001
+    lstm:
+      units: 64
+      dropout: 0.2
+      epochs: 50
+      batch_size: 128
+    dnn:
+      hidden_layers: [128, 64, 32]
+      dropout: 0.3
+      epochs: 50
+      batch_size: 128
+
+# Training Settings
+training:
+  use_gpu: true
+  save_best_only: true
+  early_stopping_patience: 10
+  cross_validation_folds: 5
+
+# Evaluation Metrics
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1_score
+    - roc_auc
+  confusion_matrix: true
+  classification_report: true
+
+# Real-time Detection
+realtime:
+  enabled: true
+  interface: "eth0"  # Network interface to monitor
+  buffer_size: 1000
+  detection_interval: 5  # seconds
+  threshold: 0.85  # Anomaly score threshold
+
+# Alert Management
+alerts:
+  enabled: true
+  severity_levels:
+    high: 0.9
+    medium: 0.7
+    low: 0.5
+  notification_methods:
+    - console
+    - log
+    - email  # Configure email settings separately
+  alert_cooldown: 60  # seconds
+
+# Monitoring
+monitoring:
+  enabled: true
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  metrics_interval: 300  # seconds
+  performance_tracking: true
+
+# Visualization
+visualization:
+  dashboard:
+    enabled: true
+    host: "127.0.0.1"
+    port: 8050
+    debug: false
+  plots:
+    save_plots: true
+    plot_format: "png"
+    dpi: 300
+
+# Logging
+logging:
+  log_dir: "logs/"
+  log_file: "anomaly_detection.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Model Persistence
+model_storage:
+  save_dir: "saved_models/"
+  model_format: "joblib"  # joblib or h5 for neural networks
+  versioning: true
+
+# Persistence / Database Logging
+persistence:
+  enable_database: true
+  database_path: "data/detections.db"
+  retention_days: 7  # Days to keep old detection records (future cleanup task)
+
+# System
+system:
+  n_jobs: -1  # Use all available cores
+  verbose: 1
