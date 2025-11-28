@@ -364,8 +364,6 @@ class RealtimeDetector:
                 import random
                 start_t = time.time()
                 emitted = 0
-                # Safety limit for truly continuous synthetic mode
-                safety_cap = 10 if (packet_count is None and duration is None) else None
                 
                 # Realistic port scanning simulation
                 # Well-known ports that are commonly scanned
@@ -440,8 +438,6 @@ class RealtimeDetector:
                     if packet_count and emitted >= packet_count:
                         break
                     if duration and (time.time() - start_t) >= duration:
-                        break
-                    if safety_cap and emitted >= safety_cap:
                         break
         else:
             try:
