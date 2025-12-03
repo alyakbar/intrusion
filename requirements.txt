@@ -24,6 +24,12 @@ python-dotenv>=1.0.0
 scapy>=2.5.0
 pyshark>=0.6
 
+# Reporting
+reportlab>=4.0.0  # PDF report generation
+
+# Threat Intelligence
+requests>=2.31.0  # API calls to threat intel providers
+
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0

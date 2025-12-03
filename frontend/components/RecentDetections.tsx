@@ -129,14 +129,28 @@ export default function RecentDetections() {
                   </div>
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">
-                  <span className="text-sm font-mono text-white">
-                    {detection.source_ip || 'N/A'}
-                  </span>
+                  <div className="flex flex-col">
+                    <span className="text-sm font-mono text-white">
+                      {detection.source_ip || 'N/A'}
+                    </span>
+                    {(detection as any).source_hostname && (
+                      <span className="text-xs text-blue-400 truncate max-w-[180px]">
+                        {(detection as any).source_hostname}
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">
-                  <span className="text-sm font-mono text-white">
-                    {detection.dest_ip || 'N/A'}
-                  </span>
+                  <div className="flex flex-col">
+                    <span className="text-sm font-mono text-white">
+                      {detection.dest_ip || 'N/A'}
+                    </span>
+                    {(detection as any).dest_hostname && (
+                      <span className="text-xs text-blue-400 truncate max-w-[180px]">
+                        {(detection as any).dest_hostname}
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-4 py-3 whitespace-nowrap">
                   {detection.protocol === 'ICMP' ? (

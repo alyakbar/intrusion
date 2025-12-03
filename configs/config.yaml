@@ -99,8 +99,29 @@ alerts:
   notification_methods:
     - console
     - log
-    - email  # Configure email settings separately
+    # - email  # Uncomment to enable email notifications
+    # - webhook  # Uncomment to enable webhook notifications
   alert_cooldown: 60  # seconds
+  
+  # Email Configuration (SMTP)
+  email:
+    enabled: false
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    sender_email: "your-email@gmail.com"
+    sender_password: "your-app-password"  # Use app-specific password for Gmail
+    recipients:
+      - "security-team@example.com"
+      - "admin@example.com"
+  
+  # Webhook Configuration
+  webhook:
+    enabled: false
+    url: "https://your-webhook-endpoint.com/alerts"
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer your-api-key"
+    timeout: 10  # seconds
 
 # Monitoring
 monitoring:
@@ -140,6 +161,25 @@ persistence:
   enable_database: true
   database_path: "data/detections.db"
   retention_days: 7  # Days to keep old detection records (future cleanup task)
+
+# Threat Intelligence
+threat_intel:
+  enabled: false  # Set to true to enable threat intelligence lookups
+  
+  # AbuseIPDB Configuration
+  abuseipdb:
+    enabled: false
+    api_key: "your-abuseipdb-api-key"
+    max_age_days: 90
+    timeout: 10
+    cache_ttl: 3600  # Cache results for 1 hour
+  
+  # VirusTotal Configuration
+  virustotal:
+    enabled: false
+    api_key: "your-virustotal-api-key"
+    timeout: 10
+    cache_ttl: 3600  # Cache results for 1 hour
 
 # System
 system:

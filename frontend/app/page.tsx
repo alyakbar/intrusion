@@ -61,6 +61,13 @@ export default function DashboardPage() {
             </div>
             <div className="flex items-center gap-4">
               <button
+                onClick={() => router.push('/advanced')}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded-lg transition-colors"
+              >
+                <Shield className="h-4 w-4 text-purple-400" />
+                <span className="text-sm text-purple-400 font-medium">Advanced Features</span>
+              </button>
+              <button
                 onClick={() => router.push('/ports')}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg transition-colors"
               >

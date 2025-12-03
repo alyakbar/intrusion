@@ -6,6 +6,10 @@ from typing import Dict, Any, List
 from datetime import datetime, timedelta
 from collections import deque
 import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests
 from ..utils.logger import LoggerFactory, log_detection_event
 
 
@@ -129,6 +133,8 @@ class AlertManager:
                     self._notify_log(alert)
                 elif method == 'email':
                     self._notify_email(alert)
+                elif method == 'webhook':
+                    self._notify_webhook(alert)
             except Exception as e:
                 self.logger.error(f"Error sending notification via {method}: {str(e)}")
     
@@ -158,14 +164,152 @@ class AlertManager:
     
     def _notify_email(self, alert: Dict[str, Any]):
         """
-        Send email notification (placeholder for email implementation).
+        Send email notification via SMTP.
         
         Args:
             alert: Alert dictionary
         """
-        # Email notification implementation would go here
-        # Would require email server configuration
-        self.logger.info(f"Email notification for alert {alert['id']} (not implemented)")
+        email_config = self.config.get('alerts', {}).get('email', {})
+        
+        if not email_config.get('enabled', False):
+            return
+        
+        try:
+            # Email configuration
+            smtp_server = email_config.get('smtp_server', 'smtp.gmail.com')
+            smtp_port = email_config.get('smtp_port', 587)
+            sender_email = email_config.get('sender_email')
+            sender_password = email_config.get('sender_password')
+            recipients = email_config.get('recipients', [])
+            
+            if not sender_email or not sender_password or not recipients:
+                self.logger.warning("Email configuration incomplete. Skipping email notification.")
+                return
+            
+            # Create message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = f"🚨 Security Alert: {alert['severity'].upper()} Severity"
+            msg['From'] = sender_email
+            msg['To'] = ', '.join(recipients)
+            
+            # Email body
+            html_body = f"""
+            <html>
+                <body>
+                    <h2 style="color: {'#dc2626' if alert['severity'] == 'high' else '#f59e0b' if alert['severity'] == 'medium' else '#10b981'};">
+                        Network Anomaly Alert
+                    </h2>
+                    <p><strong>Alert ID:</strong> {alert['id']}</p>
+                    <p><strong>Timestamp:</strong> {alert['timestamp']}</p>
+                    <p><strong>Severity:</strong> {alert['severity'].upper()}</p>
+                    <p><strong>Anomaly Score:</strong> {alert['anomaly_score']:.4f}</p>
+                    <p><strong>Description:</strong> {alert['description']}</p>
+                    
+                    <h3>Packet Details:</h3>
+                    <ul>
+                        <li><strong>Source IP:</strong> {alert['packet_data'].get('src_ip', 'N/A')}</li>
+                        <li><strong>Destination IP:</strong> {alert['packet_data'].get('dst_ip', 'N/A')}</li>
+                        <li><strong>Source Port:</strong> {alert['packet_data'].get('src_port', 'N/A')}</li>
+                        <li><strong>Destination Port:</strong> {alert['packet_data'].get('dst_port', 'N/A')}</li>
+                        <li><strong>Protocol:</strong> {alert['packet_data'].get('protocol', 'N/A')}</li>
+                    </ul>
+                    
+                    <p style="color: #6b7280; font-size: 0.875rem;">
+                        This is an automated alert from the Network Anomaly Detection System.
+                    </p>
+                </body>
+            </html>
+            """
+            
+            text_body = f"""
+            Network Anomaly Alert
+            
+            Alert ID: {alert['id']}
+            Timestamp: {alert['timestamp']}
+            Severity: {alert['severity'].upper()}
+            Anomaly Score: {alert['anomaly_score']:.4f}
+            Description: {alert['description']}
+            
+            Packet Details:
+            - Source IP: {alert['packet_data'].get('src_ip', 'N/A')}
+            - Destination IP: {alert['packet_data'].get('dst_ip', 'N/A')}
+            - Source Port: {alert['packet_data'].get('src_port', 'N/A')}
+            - Destination Port: {alert['packet_data'].get('dst_port', 'N/A')}
+            - Protocol: {alert['packet_data'].get('protocol', 'N/A')}
+            
+            This is an automated alert from the Network Anomaly Detection System.
+            """
+            
+            # Attach both plain text and HTML
+            part1 = MIMEText(text_body, 'plain')
+            part2 = MIMEText(html_body, 'html')
+            msg.attach(part1)
+            msg.attach(part2)
+            
+            # Send email
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.starttls()
+                server.login(sender_email, sender_password)
+                server.sendmail(sender_email, recipients, msg.as_string())
+            
+            self.logger.info(f"Email notification sent for alert {alert['id']}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to send email notification: {e}")
+    
+    def _notify_webhook(self, alert: Dict[str, Any]):
+        """
+        Send webhook notification via HTTP POST.
+        
+        Args:
+            alert: Alert dictionary
+        """
+        webhook_config = self.config.get('alerts', {}).get('webhook', {})
+        
+        if not webhook_config.get('enabled', False):
+            return
+        
+        try:
+            url = webhook_config.get('url')
+            headers = webhook_config.get('headers', {'Content-Type': 'application/json'})
+            timeout = webhook_config.get('timeout', 10)
+            
+            if not url:
+                self.logger.warning("Webhook URL not configured. Skipping webhook notification.")
+                return
+            
+            # Prepare payload
+            payload = {
+                'alert_id': alert['id'],
+                'timestamp': alert['timestamp'].isoformat() if isinstance(alert['timestamp'], datetime) else str(alert['timestamp']),
+                'severity': alert['severity'],
+                'anomaly_score': alert['anomaly_score'],
+                'description': alert['description'],
+                'packet_data': {
+                    'source_ip': alert['packet_data'].get('src_ip'),
+                    'destination_ip': alert['packet_data'].get('dst_ip'),
+                    'source_port': alert['packet_data'].get('src_port'),
+                    'destination_port': alert['packet_data'].get('dst_port'),
+                    'protocol': alert['packet_data'].get('protocol')
+                },
+                'status': alert['status']
+            }
+            
+            # Send POST request
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout
+            )
+            
+            if response.status_code == 200:
+                self.logger.info(f"Webhook notification sent for alert {alert['id']}")
+            else:
+                self.logger.warning(f"Webhook returned status {response.status_code} for alert {alert['id']}")
+            
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to send webhook notification: {e}")
     
     def get_active_alerts(self) -> List[Dict[str, Any]]:
         """

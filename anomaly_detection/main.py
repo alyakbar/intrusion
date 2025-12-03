@@ -18,9 +18,11 @@ from anomaly_detection.training.trainer import ModelTrainer
 from anomaly_detection.training.evaluator import ModelEvaluator
 from anomaly_detection.visualization.dashboard import AnomalyDashboard
 from anomaly_detection.inference.realtime_detector import RealtimeDetector
+from anomaly_detection.inference.multi_interface_monitor import MultiInterfaceMonitor
 import joblib
 import numpy as np
 from anomaly_detection.monitoring.automated_monitor import AutomatedMonitor
+from anomaly_detection.analysis.pcap_analyzer import PcapAnalyzer
 
 
 def train_models(config, args):
@@ -175,12 +177,43 @@ def run_detection(config, args):
     X_train, y_train, _ = preprocessor.fit_transform(train_data, label_column='label')
     logger.info(f"Preprocessor fitted on training data shape: {X_train.shape}")
 
-    detector = RealtimeDetector(config, model, preprocessor)
-
+    # Check if multiple interfaces specified
+    interfaces = getattr(args, 'interfaces', None)
     interface = args.interface
     backend = getattr(args, 'backend', 'scapy')
     packet_count = getattr(args, 'packet_count', None)
     duration = getattr(args, 'duration', None)
+    inject_rate = getattr(args, 'inject_rate', 0.0)
+    synthetic_delay = getattr(args, 'synthetic_delay', 0.0)
+    
+    # Multi-interface mode
+    if interfaces:
+        interface_list = [iface.strip() for iface in interfaces.split(',')]
+        logger.info(f"Multi-interface mode: {', '.join(interface_list)}")
+        
+        monitor = MultiInterfaceMonitor(
+            config=config,
+            model=model,
+            preprocessor=preprocessor,
+            interfaces=interface_list,
+            backend=backend
+        )
+        
+        try:
+            monitor.start_monitoring(
+                packet_count=packet_count,
+                duration=duration,
+                inject_rate=inject_rate,
+                synthetic_delay=synthetic_delay
+            )
+        except KeyboardInterrupt:
+            logger.info("Monitoring interrupted by user")
+        finally:
+            monitor.stop_monitoring()
+        return
+    
+    # Single-interface mode
+    detector = RealtimeDetector(config, model, preprocessor)
 
     if packet_count is not None:
         mode_desc = f"packet_count={packet_count}"
@@ -191,8 +224,6 @@ def run_detection(config, args):
 
     logger.info(f"Interface configured: {interface}")
     logger.info(f"Starting packet capture: backend={backend}, mode={mode_desc}")
-    inject_rate = getattr(args, 'inject_rate', 0.0)
-    synthetic_delay = getattr(args, 'synthetic_delay', 0.0)
 
     try:
         detector.start_packet_capture(interface=interface, backend=backend, packet_count=packet_count, duration=duration, inject_rate=inject_rate, synthetic_delay=synthetic_delay)
@@ -233,6 +264,82 @@ def run_monitoring(config, args):
     monitor.start_monitoring()
 
 
+def run_pcap_analysis(config, args):
+    """
+    Analyze PCAP file for anomalies.
+    
+    Args:
+        config: Configuration dictionary
+        args: Command line arguments
+    """
+    logger = LoggerFactory.get_logger('Main')
+    logger.info("Starting PCAP analysis...")
+    
+    if not args.pcap_file:
+        logger.error("PCAP file path required. Use --pcap-file <path>")
+        return
+    
+    # Load trained model
+    model_path = os.path.join(
+        config.get('model_storage', {}).get('save_dir', 'saved_models'),
+        'supervised',
+        f'{args.model}.joblib'
+    )
+    
+    if not os.path.exists(model_path):
+        logger.error(f"Model not found at {model_path}. Train the model first.")
+        return
+    
+    try:
+        model = joblib.load(model_path)
+        logger.info(f"Loaded trained {args.model} model")
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        return
+    
+    # Fit preprocessor on training data
+    data_loader = DataLoader(config.get('data', {}).get('raw_data_path', 'data/raw'))
+    try:
+        train_data, _ = data_loader.load_nsl_kdd()
+    except FileNotFoundError:
+        logger.error("NSL-KDD dataset not found for preprocessor fitting.")
+        return
+    
+    preprocessor = DataPreprocessor(
+        scaling_method=config.get('features', {}).get('scaling_method', 'standard')
+    )
+    X_train, y_train, _ = preprocessor.fit_transform(train_data, label_column='label')
+    logger.info(f"Preprocessor fitted on training data shape: {X_train.shape}")
+    
+    # Create analyzer
+    analyzer = PcapAnalyzer(
+        config=config,
+        model=model,
+        preprocessor=preprocessor,
+        backend=args.backend
+    )
+    
+    try:
+        # Analyze PCAP
+        results = analyzer.analyze_pcap(
+            pcap_path=args.pcap_file,
+            packet_filter=args.packet_filter
+        )
+        
+        # Print results
+        analyzer.print_statistics()
+        
+        if results['status'] == 'success':
+            logger.info(f"Analysis complete. Found {len(results['detections'])} anomalies.")
+        else:
+            logger.error(f"Analysis failed: {results.get('error', 'Unknown error')}")
+    
+    except Exception as e:
+        logger.error(f"PCAP analysis failed: {e}")
+    finally:
+        analyzer.close()
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -242,7 +349,7 @@ def main():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['train', 'detect', 'dashboard', 'monitor', 'evaluate'],
+        choices=['train', 'detect', 'dashboard', 'monitor', 'evaluate', 'pcap'],
         default='train',
         help='Operation mode'
     )
@@ -271,7 +378,13 @@ def main():
         '--interface',
         type=str,
         default='eth0',
-        help='Network interface for real-time detection'
+        help='Network interface for real-time detection (single interface)'
+    )
+    parser.add_argument(
+        '--interfaces',
+        type=str,
+        default=None,
+        help='Comma-separated list of network interfaces for multi-interface monitoring (e.g., "wlo1,enp0s25")'
     )
     parser.add_argument(
         '--packet-count',
@@ -304,6 +417,18 @@ def main():
         default=0.0,
         help='Seconds sleep between synthetic fallback packets (throttle)'
     )
+    parser.add_argument(
+        '--pcap-file',
+        type=str,
+        default=None,
+        help='Path to PCAP file for offline analysis (use with --mode pcap)'
+    )
+    parser.add_argument(
+        '--packet-filter',
+        type=str,
+        default=None,
+        help='BPF-style packet filter (e.g., "tcp port 80" or "icmp")'
+    )
     
     args = parser.parse_args()
     
@@ -333,6 +458,8 @@ def main():
         run_dashboard(config, args)
     elif args.mode == 'monitor':
         run_monitoring(config, args)
+    elif args.mode == 'pcap':
+        run_pcap_analysis(config, args)
     elif args.mode == 'evaluate':
         logger.info("Evaluate mode requires trained models")
     

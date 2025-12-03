@@ -13,6 +13,7 @@ from .alert_manager import AlertManager
 from ..persistence.db import DatabaseManager
 from datetime import datetime
 from pathlib import Path
+from ..threat_intel.providers import ThreatIntelligence
 
 try:
     from scapy.all import sniff, IP  # type: ignore
@@ -73,6 +74,9 @@ class RealtimeDetector:
         }
         # Database manager for persistence
         self.db_manager = DatabaseManager(config)
+        
+        # Threat intelligence
+        self.threat_intel = ThreatIntelligence(config)
     
     def process_packet(self, packet_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -210,11 +214,29 @@ class RealtimeDetector:
         Args:
             result: Detection result dictionary
         """
-        # Determine severity based on anomaly score
+        # Enrich with threat intelligence
+        packet_data = result.get('packet_data', {})
+        detection_record = {
+            'timestamp': result['timestamp'],
+            'src_ip': packet_data.get('src_ip') or packet_data.get('source_ip'),
+            'dst_ip': packet_data.get('dst_ip') or packet_data.get('dest_ip'),
+            'protocol': packet_data.get('protocol'),
+            'anomaly_score': result['anomaly_score']
+        }
+        
+        # Enrich with threat intel if enabled
+        enriched_detection = self.threat_intel.enrich_detection(detection_record)
+        
+        # Determine severity based on anomaly score and threat score
         score = result['anomaly_score']
-        if score >= 0.9:
+        threat_score = enriched_detection.get('threat_score', 0.0)
+        
+        # Adjust severity based on combined scores
+        combined_score = (score * 0.6) + (threat_score / 100.0 * 0.4)
+        
+        if combined_score >= 0.9 or threat_score >= 75:
             severity = 'high'
-        elif score >= 0.7:
+        elif combined_score >= 0.7 or threat_score >= 50:
             severity = 'medium'
         else:
             severity = 'low'
@@ -224,7 +246,9 @@ class RealtimeDetector:
             'timestamp': result['timestamp'],
             'severity': severity,
             'anomaly_score': score,
-            'description': f"Anomaly detected with score {score:.4f}",
+            'threat_score': threat_score,
+            'threat_intel': enriched_detection.get('threat_intel', {}),
+            'description': f"Anomaly detected with score {score:.4f}, threat score {threat_score:.1f}",
             'packet_data': result['packet_data']
         }
         
@@ -238,6 +262,7 @@ class RealtimeDetector:
             'is_anomaly': True,
             'anomaly_score': score,
             'severity': severity,
+            'threat_score': threat_score,
             'packet_data': result['packet_data']
         })
 
@@ -337,6 +362,15 @@ class RealtimeDetector:
                     if hasattr(pkt, 'ip'):
                         packet_data['src_ip'] = getattr(pkt.ip, 'src', None)
                         packet_data['dst_ip'] = getattr(pkt.ip, 'dst', None)
+                    
+                    # Extract port information from TCP/UDP layers
+                    if hasattr(pkt, 'tcp'):
+                        packet_data['src_port'] = int(getattr(pkt.tcp, 'srcport', 0))
+                        packet_data['dst_port'] = int(getattr(pkt.tcp, 'dstport', 0))
+                    elif hasattr(pkt, 'udp'):
+                        packet_data['src_port'] = int(getattr(pkt.udp, 'srcport', 0))
+                        packet_data['dst_port'] = int(getattr(pkt.udp, 'dstport', 0))
+                    
                     packet_data['protocol'] = getattr(pkt, 'highest_layer', None)
                     packet_data['packet_length'] = getattr(pkt, 'length', None)
                     packet_data['capture_time'] = datetime.utcnow().isoformat()
@@ -359,6 +393,13 @@ class RealtimeDetector:
                     sniff_args['timeout'] = duration
                 sniff(**sniff_args)
             except Exception as e:
+                # If synthetic injection is disabled, do NOT generate synthetic traffic.
+                # This ensures dashboard reflects real traffic state (idle when wifi is off).
+                if inject_rate == 0:
+                    self.logger.error(f"Scapy sniff failed: {e}. Synthetic fallback disabled (inject_rate=0). Capture stopped/idle.")
+                    # Print current statistics and return without synthetic generation
+                    self.print_statistics()
+                    return
                 self.logger.error(f"Scapy sniff failed: {e}. Falling back to synthetic packet generation.")
                 # Fallback synthetic packets honoring packet_count or duration
                 import random
@@ -431,7 +472,17 @@ class RealtimeDetector:
                         self._handle_anomaly(injected)
                         self.buffer.append(injected)
                     else:
-                        self.process_packet(packet_data)
+                        # Process and log normal synthetic packets so they appear in live feed
+                        result = self.process_packet(packet_data)
+                        # Also log non-anomalous synthetic packets to database for live feed
+                        if inject_rate > 0:  # We're in synthetic mode
+                            self._log_detection({
+                                'timestamp': datetime.now(),
+                                'is_anomaly': False,
+                                'anomaly_score': 0.0,
+                                'severity': None,
+                                'packet_data': packet_data
+                            })
                     emitted += 1
                     if synthetic_delay > 0:
                         time.sleep(synthetic_delay)
@@ -441,14 +492,183 @@ class RealtimeDetector:
                         break
         else:
             try:
-                capture = pyshark.LiveCapture(interface=interface)
-                start_t = time.time()
-                for i, pkt in enumerate(capture.sniff_continuously(packet_count=packet_count)):
-                    _process_packet(pkt)
-                    if packet_count and i + 1 >= packet_count:
-                        break
-                    if duration and (time.time() - start_t) >= duration:
-                        break
+                import subprocess
+                import time as time_module
+                
+                def is_interface_up(iface):
+                    """Check if network interface is up and has an IP address"""
+                    try:
+                        result = subprocess.run(
+                            ['ip', 'addr', 'show', iface],
+                            capture_output=True,
+                            text=True,
+                            timeout=2
+                        )
+                        if result.returncode != 0:
+                            return False
+                        # Check if interface is UP and has an inet (IPv4) address
+                        output = result.stdout
+                        return 'state UP' in output and 'inet ' in output
+                    except Exception:
+                        return False
+                
+                # Initial interface check
+                if not is_interface_up(interface):
+                    self.logger.warning(f"Interface {interface} is DOWN or has no IP address. Waiting for it to come up...")
+                    print(f"⚠️  WARNING: Interface {interface} is not ready. Waiting...")
+                    
+                    # Wait for interface to come up (with timeout)
+                    wait_timeout = 300  # 5 minutes
+                    wait_start = time_module.time()
+                    while not is_interface_up(interface):
+                        if time_module.time() - wait_start > wait_timeout:
+                            self.logger.error(f"Timeout waiting for interface {interface} to come up")
+                            return
+                        time_module.sleep(5)
+                        if is_interface_up(interface):
+                            self.logger.info(f"Interface {interface} is now UP! Starting capture...")
+                            print(f"✅ Interface {interface} is UP! Starting capture...")
+                            break
+                
+                # Start capture with auto-recovery
+                capture = None
+                capture_iterator = None
+                start_t = time_module.time()
+                packet_count_captured = 0
+                last_interface_check = time_module.time()
+                interface_check_interval = 5  # Check interface status every 5 seconds
+                packets_since_last_check = 0
+                
+                while True:
+                    # Periodic interface check
+                    current_time = time_module.time()
+                    if current_time - last_interface_check >= interface_check_interval:
+                        last_interface_check = current_time
+                        
+                        # Check if interface is down
+                        if not is_interface_up(interface):
+                            self.logger.warning(f"Interface {interface} went DOWN! Pausing capture...")
+                            print(f"⚠️  Interface {interface} went DOWN! Waiting for it to come back up...")
+                            
+                            # Clean up capture
+                            if capture:
+                                try:
+                                    capture.close()
+                                except Exception:
+                                    pass
+                                capture = None
+                                capture_iterator = None
+                            
+                            # Wait for interface to come back up
+                            while not is_interface_up(interface):
+                                time_module.sleep(5)
+                            
+                            self.logger.info(f"Interface {interface} is back UP! Resuming capture...")
+                            print(f"✅ Interface {interface} is back UP! Resuming capture...")
+                            
+                        # Check if capture is stuck (no packets for 5+ seconds while interface is up)
+                        elif packets_since_last_check == 0 and capture is not None:
+                            self.logger.warning("No packets captured in last 5 seconds, recreating capture...")
+                            print(f"⚠️  Capture appears stuck, recreating...")
+                            if capture:
+                                try:
+                                    capture.close()
+                                except Exception:
+                                    pass
+                                capture = None
+                                capture_iterator = None
+                        
+                        # Reset counter
+                        packets_since_last_check = 0
+                    
+                    # (Re)create capture if needed
+                    if capture is None or capture_iterator is None:
+                        try:
+                            if capture:
+                                try:
+                                    capture.close()
+                                except Exception:
+                                    pass
+                            
+                            self.logger.info(f"Creating new capture on {interface}...")
+                            print(f"🔄 Creating new capture on {interface}...")
+                            capture = pyshark.LiveCapture(interface=interface)
+                            capture_iterator = capture.sniff_continuously()
+                            self.logger.info("Capture created successfully, starting packet sniffing...")
+                            print(f"✅ Capture ready, sniffing packets...")
+                        except Exception as e:
+                            self.logger.error(f"Failed to create capture: {e}")
+                            capture = None
+                            capture_iterator = None
+                            time_module.sleep(5)
+                            continue
+                    
+                    # Capture packets
+                    try:
+                        # Get next packet with timeout
+                        pkt = next(capture_iterator, None)
+                        
+                        if pkt:
+                            _process_packet(pkt)
+                            packet_count_captured += 1
+                            packets_since_last_check += 1
+                            
+                            # Check stop conditions
+                            if packet_count and packet_count_captured >= packet_count:
+                                self.logger.info(f"Reached packet count limit: {packet_count}")
+                                return
+                            if duration and (time_module.time() - start_t) >= duration:
+                                self.logger.info(f"Reached duration limit: {duration}s")
+                                return
+                        else:
+                            # No packet, small delay
+                            time_module.sleep(0.01)
+                            
+                    except KeyboardInterrupt:
+                        self.logger.info("Packet capture interrupted by user")
+                        raise
+                    except StopIteration:
+                        # Iterator ended, recreate everything
+                        self.logger.warning("Capture iterator ended, recreating...")
+                        print(f"⚠️  Capture ended, recreating...")
+                        if capture:
+                            try:
+                                capture.close()
+                            except Exception:
+                                pass
+                        capture = None
+                        capture_iterator = None
+                        time_module.sleep(1)
+                        continue
+                    except Exception as e:
+                        # Capture error
+                        error_msg = str(e).lower()
+                        
+                        # Check if interface went down
+                        if not is_interface_up(interface):
+                            self.logger.warning(f"Interface {interface} went DOWN during capture")
+                            if capture:
+                                try:
+                                    capture.close()
+                                except Exception:
+                                    pass
+                            capture = None
+                            capture_iterator = None
+                            continue
+                        
+                        # Other errors - recreate capture
+                        self.logger.error(f"PyShark capture error: {e}, recreating capture...")
+                        print(f"⚠️  Capture error, recreating...")
+                        if capture:
+                            try:
+                                capture.close()
+                            except Exception:
+                                pass
+                        capture = None
+                        capture_iterator = None
+                        time_module.sleep(1)
+                        continue
+                            
             except KeyboardInterrupt:
                 self.logger.info("Packet capture interrupted by user")
             except Exception as e:

@@ -58,6 +58,12 @@ class DatabaseManager:
         except sqlite3.OperationalError:
             pass  # Column already exists
         
+        # Add threat_score column for threat intelligence integration
+        try:
+            conn.execute("ALTER TABLE detections ADD COLUMN threat_score REAL")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
         conn.commit()
         conn.close()
         self.logger.info(f"Database initialized at {self.db_path}")
@@ -81,8 +87,8 @@ class DatabaseManager:
             with self._lock:
                 conn = self._connect()
                 conn.execute(
-                    """INSERT INTO detections (timestamp, source_ip, dest_ip, source_port, dest_port, protocol, anomaly_score, is_anomaly, severity, raw_packet)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO detections (timestamp, source_ip, dest_ip, source_port, dest_port, protocol, anomaly_score, is_anomaly, severity, raw_packet, threat_score)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         ts,
                         record.get('source_ip'),
@@ -93,7 +99,8 @@ class DatabaseManager:
                         float(record.get('anomaly_score', 0.0)),
                         1 if record.get('is_anomaly') else 0,
                         record.get('severity'),
-                        record.get('raw_packet')
+                        record.get('raw_packet'),
+                        float(record.get('threat_score', 0.0))
                     )
                 )
                 conn.commit()

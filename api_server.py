@@ -3,12 +3,15 @@ Flask API server for Network Anomaly Detection Frontend
 Provides REST endpoints to query detection data from SQLite database
 """
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import sqlite3
 from datetime import datetime, timedelta
 import os
 from typing import Dict, List, Any
+import tempfile
+import socket
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -16,12 +19,76 @@ CORS(app)
 # Database path
 DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'detections.db')
 
+# Hostname cache
+_hostname_cache = {}
+_hostname_cache_lock = threading.Lock()
+
 
 def get_db_connection():
     """Create database connection"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def get_hostname(ip: str, timeout: float = 0.3) -> str:
+    """
+    Get hostname for an IP address with caching
+    Returns hostname or None if not found
+    """
+    if not ip or ip == 'N/A':
+        return None
+    
+    # Skip private/local IPs - they rarely have meaningful hostnames
+    if ip.startswith(('192.168.', '10.', '172.16.', '172.17.', '172.18.', '172.19.', 
+                      '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.',
+                      '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.',
+                      '127.', 'localhost', '::1', 'fe80:')):
+        return None
+    
+    # Check cache first
+    with _hostname_cache_lock:
+        if ip in _hostname_cache:
+            return _hostname_cache[ip]
+    
+    # Try to resolve with timeout using threading
+    hostname_result = [None]
+    
+    def resolve():
+        try:
+            hostname_result[0] = socket.gethostbyaddr(ip)[0]
+        except (socket.herror, socket.gaierror, socket.timeout, OSError):
+            hostname_result[0] = None
+    
+    resolve_thread = threading.Thread(target=resolve, daemon=True)
+    resolve_thread.start()
+    resolve_thread.join(timeout=timeout)
+    
+    hostname = hostname_result[0]
+    
+    if hostname and hostname != ip:
+        # Clean up hostname
+        # Extract domain name (e.g., github.com from lb-140-82-112-21-iad.github.com)
+        parts = hostname.split('.')
+        if len(parts) >= 2:
+            # Common patterns: service.domain.com, subdomain.domain.com
+            if any(known in hostname.lower() for known in ['google', 'github', 'microsoft', 'azure', 'amazon', 'cloudflare']):
+                # Extract main domain
+                for i in range(len(parts) - 1):
+                    test_domain = '.'.join(parts[i:])
+                    if any(known in test_domain.lower() for known in ['google.com', 'github.com', 'microsoft.com', 'azure.com', 'amazonaws.com', 'cloudflare.com']):
+                        hostname = test_domain
+                        break
+        
+        # Cache the result
+        with _hostname_cache_lock:
+            _hostname_cache[ip] = hostname
+        return hostname
+    
+    # Cache negative result
+    with _hostname_cache_lock:
+        _hostname_cache[ip] = None
+    return None
 
 
 def classify_attack_type(packet_data: str, protocol: str, anomaly_score: float) -> str:
@@ -95,12 +162,14 @@ def get_stats():
         ''')
         severity_counts = {row['severity']: row['count'] for row in cursor.fetchall()}
         
-        # Recent activity (last hour)
+        # Recent activity (last hour) - use local time comparison
+        from datetime import datetime, timedelta
+        threshold_1h = (datetime.now() - timedelta(hours=1)).isoformat()
         cursor.execute('''
             SELECT COUNT(*) as recent 
             FROM detections 
-            WHERE datetime(timestamp) > datetime('now', '-1 hour')
-        ''')
+            WHERE timestamp > ?
+        ''', (threshold_1h,))
         recent = cursor.fetchone()['recent']
         
         conn.close()
@@ -187,19 +256,22 @@ def get_timeline():
     """Get detection timeline for charts"""
     try:
         hours = int(request.args.get('hours', 24))
+        from datetime import datetime, timedelta
+        threshold = (datetime.now() - timedelta(hours=hours)).isoformat()
+        
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute(f'''
+        cursor.execute('''
             SELECT 
                 strftime('%Y-%m-%d %H:00:00', timestamp) as hour,
                 COUNT(*) as total,
                 SUM(CASE WHEN is_anomaly = 1 THEN 1 ELSE 0 END) as anomalies
             FROM detections
-            WHERE datetime(timestamp) > datetime('now', '-{hours} hours')
+            WHERE timestamp > ?
             GROUP BY hour
             ORDER BY hour ASC
-        ''')
+        ''', (threshold,))
         
         rows = cursor.fetchall()
         conn.close()
@@ -223,12 +295,15 @@ def get_recent():
     """Get most recent detections"""
     try:
         limit = int(request.args.get('limit', 50))
+        # Cap at 100 to prevent performance issues
+        limit = min(limit, 100)
+        
         conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute(f'''
             SELECT id, timestamp, source_ip, dest_ip, source_port, dest_port, 
-                   protocol, anomaly_score, is_anomaly, severity
+                   protocol, anomaly_score, is_anomaly, severity, threat_score
             FROM detections
             ORDER BY id DESC
             LIMIT {limit}
@@ -237,21 +312,32 @@ def get_recent():
         rows = cursor.fetchall()
         conn.close()
         
-        detections = [
-            {
+        detections = []
+        # Only resolve hostnames for first 20 records to avoid blocking
+        for idx, row in enumerate(rows):
+            # Skip hostname resolution for older records to prevent API hang
+            if idx < 20:
+                source_hostname = get_hostname(row['source_ip'])
+                dest_hostname = get_hostname(row['dest_ip'])
+            else:
+                source_hostname = None
+                dest_hostname = None
+            
+            detections.append({
                 'id': row['id'],
                 'timestamp': row['timestamp'],
                 'source_ip': row['source_ip'],
+                'source_hostname': source_hostname,
                 'dest_ip': row['dest_ip'],
+                'dest_hostname': dest_hostname,
                 'source_port': row['source_port'],
                 'dest_port': row['dest_port'],
                 'protocol': row['protocol'],
                 'anomaly_score': row['anomaly_score'],
                 'is_anomaly': bool(row['is_anomaly']),
-                'severity': row['severity']
-            }
-            for row in rows
-        ]
+                'severity': row['severity'],
+                'threat_score': row['threat_score'] if row['threat_score'] is not None else 0.0
+            })
         
         return jsonify(detections)
     except Exception as e:
@@ -572,5 +658,182 @@ def get_port_distribution():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/reports/generate', methods=['GET'])
+def generate_report():
+    """Generate detection report in specified format"""
+    try:
+        from anomaly_detection.utils.config import load_config
+        from anomaly_detection.reporting.report_generator import ReportGenerator
+        
+        # Get parameters
+        report_format = request.args.get('format', 'pdf').lower()
+        start_date_str = request.args.get('start_date')
+        end_date_str = request.args.get('end_date')
+        include_charts = request.args.get('include_charts', 'true').lower() == 'true'
+        
+        # Parse dates
+        start_date = datetime.fromisoformat(start_date_str) if start_date_str else None
+        end_date = datetime.fromisoformat(end_date_str) if end_date_str else None
+        
+        # Load config
+        config = load_config('configs/config.yaml')
+        
+        # Generate report
+        generator = ReportGenerator(config)
+        
+        # Create temp file
+        suffix = '.pdf' if report_format == 'pdf' else '.csv'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            output_path = tmp_file.name
+        
+        result = generator.generate_report(
+            output_path=output_path,
+            format=report_format,
+            start_date=start_date,
+            end_date=end_date,
+            include_charts=include_charts
+        )
+        
+        if result['status'] == 'success':
+            # Return file
+            mimetype = 'application/pdf' if report_format == 'pdf' else 'text/csv'
+            filename = f"detection_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+            
+            return send_file(
+                output_path,
+                mimetype=mimetype,
+                as_attachment=True,
+                download_name=filename
+            )
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/system/status', methods=['GET'])
+def get_system_status():
+    """Check if detection process is actually running"""
+    try:
+        import subprocess
+        import psutil
+        
+        # Check for running detection process
+        detection_running = False
+        detection_pid = None
+        detection_info = {}
+        
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info.get('cmdline', [])
+                if cmdline and 'python' in cmdline[0].lower():
+                    # Check if it's running anomaly detection
+                    cmdline_str = ' '.join(cmdline)
+                    if 'anomaly_detection/main.py' in cmdline_str and '--mode detect' in cmdline_str:
+                        detection_running = True
+                        detection_pid = proc.info['pid']
+                        
+                        # Extract parameters
+                        detection_info = {
+                            'pid': detection_pid,
+                            'interface': None,
+                            'backend': None,
+                            'inject_rate': None
+                        }
+                        
+                        # Parse command line arguments
+                        for i, arg in enumerate(cmdline):
+                            if arg == '--interface' and i + 1 < len(cmdline):
+                                detection_info['interface'] = cmdline[i + 1]
+                            elif arg == '--backend' and i + 1 < len(cmdline):
+                                detection_info['backend'] = cmdline[i + 1]
+                            elif arg == '--inject-rate' and i + 1 < len(cmdline):
+                                detection_info['inject_rate'] = float(cmdline[i + 1])
+                        
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        
+        # Check database for recent activity (last 30 seconds)
+        # Handle timezone: database uses local time, compare with local time
+        from datetime import datetime, timedelta
+        now_local = datetime.now()
+        threshold = (now_local - timedelta(seconds=30)).isoformat()
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) as recent_count, MAX(timestamp) as latest
+            FROM detections
+            WHERE timestamp > ?
+        ''', (threshold,))
+        row = cursor.fetchone()
+        recent_count = row['recent_count']
+        latest_timestamp = row['latest']
+        conn.close()
+        
+        # Check network interface status
+        interface_up = False
+        interface_info = {}
+        if detection_running and detection_info.get('interface'):
+            try:
+                iface = detection_info['interface']
+                result = subprocess.run(
+                    ['ip', 'addr', 'show', iface],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    output = result.stdout
+                    interface_up = 'state UP' in output and 'inet ' in output
+                    
+                    # Extract IP address
+                    if 'inet ' in output:
+                        for line in output.split('\n'):
+                            if 'inet ' in line:
+                                ip_addr = line.strip().split()[1]
+                                interface_info = {
+                                    'name': iface,
+                                    'status': 'up' if interface_up else 'down',
+                                    'ip': ip_addr if interface_up else None
+                                }
+                                break
+            except Exception:
+                pass
+        
+        # Determine actual status
+        is_capturing = detection_running and recent_count > 0
+        
+        # Determine status message
+        if not detection_running:
+            status = 'stopped'
+            status_message = 'Detection process not running'
+        elif not interface_up and detection_info.get('interface'):
+            status = 'waiting'
+            status_message = f"Waiting for interface {detection_info['interface']} to come up"
+        elif is_capturing:
+            status = 'active'
+            status_message = 'Actively capturing packets'
+        else:
+            status = 'idle'
+            status_message = 'Running but no recent packets'
+        
+        return jsonify({
+            'detection_process_running': detection_running,
+            'is_capturing_packets': is_capturing,
+            'recent_packets_30s': recent_count,
+            'latest_packet_time': latest_timestamp,
+            'process_info': detection_info if detection_running else None,
+            'interface_info': interface_info if interface_info else None,
+            'status': status,
+            'status_message': status_message
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Disable debug mode to prevent reload issues
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

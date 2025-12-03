@@ -33,20 +33,23 @@ export default function LivePacketCapture() {
 
   const fetchCaptureStats = async () => {
     try {
+      // Fetch system status to check if detection is actually running
+      const statusRes = await fetch('http://localhost:5000/api/system/status')
+      const statusData = await statusRes.json()
+      
       // Fetch overall stats
       const statsRes = await fetch('http://localhost:5000/api/detections/stats')
       const statsData = await statsRes.json()
       
-      // Fetch recent detections to check for activity
+      // Fetch recent detections
       const recentRes = await fetch('http://localhost:5000/api/detections/recent?limit=20')
       const recentData = await recentRes.json()
       
-      // Check if detection is active (recent packets within last 10 seconds)
-      const now = new Date()
-      const isActive = recentData.some((d: any) => {
-        const timestamp = new Date(d.timestamp)
-        return (now.getTime() - timestamp.getTime()) < 10000
-      })
+      // Use system status to determine if actually capturing
+      const isActive = statusData.is_capturing_packets || false;
+      
+      // Store system status for display
+      (window as any).systemStatus = statusData;
       
       setStats({
         isActive,
@@ -101,26 +104,44 @@ export default function LivePacketCapture() {
           </div>
           <div>
             <h3 className="text-lg font-semibold text-white">Live Packet Capture</h3>
-            <p className="text-sm text-gray-400">Real-time network monitoring</p>
+            <p className="text-sm text-gray-400">
+              {(window as any).systemStatus?.process_info?.inject_rate > 0 
+                ? `Demo mode (${((window as any).systemStatus.process_info.inject_rate * 100).toFixed(0)}% synthetic anomalies)`
+                : 'Real-time network monitoring'}
+            </p>
           </div>
         </div>
         
-        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${
-          stats.isActive 
-            ? 'bg-green-500/10 border-green-500/30' 
-            : 'bg-gray-500/10 border-gray-500/30'
-        }`}>
-          {stats.isActive ? (
-            <>
-              <div className="h-2 w-2 bg-green-500 rounded-full animate-pulse"></div>
-              <span className="text-sm text-green-400 font-medium">Capturing</span>
-            </>
-          ) : (
-            <>
-              <div className="h-2 w-2 bg-gray-500 rounded-full"></div>
-              <span className="text-sm text-gray-400 font-medium">Idle</span>
-            </>
+        <div className="flex items-center gap-2">
+          {/* Synthetic Mode Badge */}
+          {(window as any).systemStatus?.process_info?.inject_rate > 0 && (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border bg-amber-500/10 border-amber-500/30 mr-2">
+              <AlertCircle className="h-4 w-4 text-amber-400" />
+              <span className="text-sm text-amber-400 font-medium">Dummy Data</span>
+            </div>
           )}
+          
+          {/* Status Badge */}
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${
+            stats.isActive 
+              ? 'bg-green-500/10 border-green-500/30' 
+              : 'bg-gray-500/10 border-gray-500/30'
+          }`}>
+            {stats.isActive ? (
+              <>
+                <div className="h-2 w-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span className="text-sm text-green-400 font-medium">Active</span>
+              </>
+            ) : (
+              <>
+                <div className="h-2 w-2 bg-gray-500 rounded-full"></div>
+                <span className="text-sm text-gray-400 font-medium">
+                  {(window as any).systemStatus?.status === 'waiting' ? 'Waiting' : 
+                   (window as any).systemStatus?.status === 'stopped' ? 'Stopped' : 'Idle'}
+                </span>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -189,6 +210,13 @@ export default function LivePacketCapture() {
                       </span>
                     )}
                   </div>
+                  {((packet as any).source_hostname || (packet as any).dest_hostname) && (
+                    <div className="text-xs text-blue-400 truncate mt-0.5">
+                      {(packet as any).source_hostname && <span>{(packet as any).source_hostname}</span>}
+                      {(packet as any).source_hostname && (packet as any).dest_hostname && <span> → </span>}
+                      {(packet as any).dest_hostname && <span>{(packet as any).dest_hostname}</span>}
+                    </div>
+                  )}
                   <div className="flex items-center gap-2 mt-1">
                     <span className="text-xs px-2 py-0.5 rounded bg-blue-500/20 border border-blue-500/40 text-blue-400 font-semibold">
                       {packet.protocol || 'Unknown'}

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Test - Network Anomaly Detection</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 { color: #60a5fa; }
+        .test-section {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .success { background: #065f46; color: #10b981; }
+        .error { background: #7f1d1d; color: #ef4444; }
+        pre {
+            background: #0a0a0a;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            border: 1px solid #333;
+        }
+        button {
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin: 10px 5px 10px 0;
+            font-size: 14px;
+        }
+        button:hover { background: #1d4ed8; }
+        .loading { color: #fbbf24; }
+    </style>
+</head>
+<body>
+    <h1>🔍 Network Anomaly Detection - API Test</h1>
+    
+    <div class="test-section">
+        <h2>1. Stats Endpoint
+            <span id="stats-status" class="status loading">Testing...</span>
+        </h2>
+        <button onclick="testStats()">Refresh Stats</button>
+        <pre id="stats-output">Loading...</pre>
+    </div>
+
+    <div class="test-section">
+        <h2>2. Recent Detections
+            <span id="recent-status" class="status loading">Testing...</span>
+        </h2>
+        <button onclick="testRecent()">Refresh Recent</button>
+        <pre id="recent-output">Loading...</pre>
+    </div>
+
+    <div class="test-section">
+        <h2>3. Timeline
+            <span id="timeline-status" class="status loading">Testing...</span>
+        </h2>
+        <button onclick="testTimeline()">Refresh Timeline</button>
+        <pre id="timeline-output">Loading...</pre>
+    </div>
+
+    <div class="test-section">
+        <h2>4. Attack Types
+            <span id="types-status" class="status loading">Testing...</span>
+        </h2>
+        <button onclick="testTypes()">Refresh Types</button>
+        <pre id="types-output">Loading...</pre>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:5000';
+
+        async function testEndpoint(endpoint, outputId, statusId) {
+            const output = document.getElementById(outputId);
+            const status = document.getElementById(statusId);
+            
+            status.textContent = 'Loading...';
+            status.className = 'status loading';
+            output.textContent = 'Fetching data...';
+
+            try {
+                const res = await fetch(`${API_BASE}${endpoint}`);
+                const data = await res.json();
+                
+                if (res.ok) {
+                    status.textContent = '✓ Success';
+                    status.className = 'status success';
+                    output.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    status.textContent = '✗ Error';
+                    status.className = 'status error';
+                    output.textContent = `Error ${res.status}: ${JSON.stringify(data, null, 2)}`;
+                }
+            } catch (error) {
+                status.textContent = '✗ Failed';
+                status.className = 'status error';
+                output.textContent = `Network Error: ${error.message}\n\nIs the API server running?\nRun: ./start_advanced.sh`;
+            }
+        }
+
+        function testStats() {
+            testEndpoint('/api/detections/stats', 'stats-output', 'stats-status');
+        }
+
+        function testRecent() {
+            testEndpoint('/api/detections/recent?limit=5', 'recent-output', 'recent-status');
+        }
+
+        function testTimeline() {
+            testEndpoint('/api/detections/timeline?hours=24', 'timeline-output', 'timeline-status');
+        }
+
+        function testTypes() {
+            testEndpoint('/api/detections/by-type', 'types-output', 'types-status');
+        }
+
+        // Auto-test on page load
+        window.onload = () => {
+            testStats();
+            testRecent();
+            testTimeline();
+            testTypes();
+        };
+
+        // Auto-refresh every 10 seconds
+        setInterval(() => {
+            testStats();
+            testRecent();
+        }, 10000);
+    </script>
+</body>
+</html>
